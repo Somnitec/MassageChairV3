@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Chair — dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <header>
+    <span class="brand">THE&nbsp;CHAIR</span>
+    <span id="phase" class="pill">phase: —</span>
+    <span id="clock" class="pill">t = 0s / 0s</span>
+    <span id="latency" class="pill dim">—</span>
+    <span id="gen-indicator" class="pill gen-pill hidden">⟳ generating</span>
+    <div class="header-right">
+      <span id="state-pill" class="pill state-pill state-idle">IDLE</span>
+      <button type="button" id="toggle-headphones" class="sensor-btn sensor-off" title="Toggle headphones">🎧</button>
+      <button type="button" id="toggle-sitting"    class="sensor-btn sensor-off" title="Toggle sitting">🪑</button>
+      <button type="button" class="icon-btn" id="settings-btn" title="Settings">⚙</button>
+      <span id="conn" class="pill conn off">offline</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- LEFT: the massage functions, drawn on the chair + read out -->
+    <section class="left">
+      <div class="chair-wrap">
+        <div id="chair" class="chair">
+          <!-- overlay imgs injected by app.js -->
+          <!-- roller technique zones -->
+          <div class="hotspot hs-kneading"       data-technique="knead"    title="Kneading"></div>
+          <div class="hotspot hs-pounding-left"  data-technique="pound"    title="Pounding"></div>
+          <div class="hotspot hs-pounding-right" data-technique="pound"    title="Pounding"></div>
+          <!-- roller direction: hold to move, release to stop -->
+          <div class="hotspot hs-roller-up"      data-roller-dir="up"   title="Roller up (hold)"></div>
+          <div class="hotspot hs-roller-down"    data-roller-dir="down" title="Roller down (hold)"></div>
+          <!-- roller position track: click to seek -->
+          <div class="hotspot hs-roller-track"   data-roller-track         title="Roller position"></div>
+          <!-- body area toggles -->
+          <div class="hotspot hs-shoulder-left"  data-area="shoulders"     title="Shoulders"></div>
+          <div class="hotspot hs-shoulder-right" data-area="shoulders"     title="Shoulders"></div>
+          <div class="hotspot hs-arm-left"       data-area="arms"          title="Arms"></div>
+          <div class="hotspot hs-arm-right"      data-area="arms"          title="Arms"></div>
+          <div class="hotspot hs-legs"           data-area="legs"          title="Legs"></div>
+          <div class="hotspot hs-feet"           data-area="feet"          title="Feet"></div>
+          <!-- airbag outer columns (both sides → airbags toggle) -->
+          <div class="hotspot hs-airbag-out-l"   data-toggle="airbags"     title="Airbags"></div>
+          <div class="hotspot hs-airbag-out-r"   data-toggle="airbags"     title="Airbags"></div>
+          <!-- airpump indicator (also controls airbags) -->
+          <div class="hotspot hs-airpump"        data-toggle="airpump"     title="Airpump "></div>
+          <!-- butt vibration strip -->
+          <div class="hotspot hs-butt-vibration" data-toggle="vibration"   title="Vibration"></div>
+          <!-- chair recline -->
+          <div class="hotspot hs-recline"      data-toggle="recline" title="Chair recline"></div>
+          <!-- red/green status light -->
+          <div class="hotspot hs-statuslight"  data-toggle="status"  title="Status light"></div>
+        </div>
+        <div class="area-legend">
+          <div class="legend-title">click area to toggle</div>
+          <div id="active-areas" class="active-areas"></div>
+        </div>
+      </div>
+
+      <div class="functions">
+        <h2>massage</h2>
+        <div class="bars">
+          <label>intensity <span data-val="intensity">0</span></label>
+          <div class="bar"><i data-bar="intensity"></i></div>
+          <label>speed <span data-val="speed">0</span></label>
+          <div class="bar"><i data-bar="speed"></i></div>
+          <label>vibration <span data-val="vibration">0</span></label>
+          <div class="bar"><i data-bar="vibration"></i></div>
+        </div>
+        <div class="readout">
+          <div>technique: <b id="technique">—</b></div>
+          <div>areas: <b id="areas">—</b></div>
+          <div>airbags: <b id="airbags">—</b></div>
+          <div>LED: <b id="led">—</b> <span id="led-swatch" class="swatch"></span></div>
+        </div>
+
+        <h2 class="patterns-header">demo patterns</h2>
+        <div class="pattern-btns" id="pattern-btns">
+          <!-- injected by app.js once settings arrive -->
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: what the chair says + the controls + profile -->
+    <section class="right">
+      <div class="speech" id="speech-box">
+        <div class="say-label">🗣 the chair says</div>
+        <p id="spoken">…</p>
+        <span class="gen-cursor hidden" id="gen-cursor">▋</span>
+      </div>
+
+      <div class="screens" id="screens">
+        <button type="button" class="opt" data-opt="1">…</button>
+        <button type="button" class="opt" data-opt="2">…</button>
+        <button type="button" class="opt" data-opt="3">…</button>
+      </div>
+
+      <div class="controls">
+        <button type="button" class="ctl led-btn" data-btn="YES"      data-led="yes">yes</button>
+        <button type="button" class="ctl led-btn" data-btn="NO"       data-led="no">no</button>
+        <button type="button" class="ctl"         data-btn="MAYBE">maybe</button>
+        <button type="button" class="ctl"         data-btn="REPEAT">repeat</button>
+        <button type="button" class="ctl"         data-btn="THUMB_UP">👍</button>
+        <button type="button" class="ctl"         data-btn="THUMB_DOWN">👎</button>
+        <button type="button" class="ctl"         data-btn="HORN">📯</button>
+        <button type="button" class="ctl led-btn" data-btn="SETTINGS" data-led="settings">settings</button>
+        <button type="button" class="ctl kill"    data-btn="KILL">KILL</button>
+      </div>
+
+      <div class="volume-row">
+        <span class="row-label row-spacer">vol</span>
+        <button type="button" class="vol" data-vol="1">1</button>
+        <button type="button" class="vol" data-vol="2">2</button>
+        <button type="button" class="vol" data-vol="3">3</button>
+        <button type="button" class="vol" data-vol="4">4</button>
+        <button type="button" class="vol" data-vol="5">5</button>
+        <span class="row-label row-spacer">lang</span>
+        <button type="button" class="lang" data-dir="up">▲</button>
+        <button type="button" class="lang" data-dir="down">▼</button>
+      </div>
+
+      <div class="profile">
+        <div>👁 sentiment: <b id="sentiment">—</b></div>
+        <div class="dim" id="note"></div>
+        <div class="dim" id="traits"></div>
+        <div class="dim" id="trail"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- BOTTOM: the event log -->
+  <section class="log">
+    <h2>log</h2>
+    <ul id="log"></ul>
+  </section>
+
+  <!-- SETTINGS PANEL -->
+  <div id="settings-overlay" class="settings-overlay hidden">
+    <div class="settings-panel">
+      <div class="settings-header">
+        <span>⚙ settings</span>
+        <button type="button" id="settings-close" class="close-btn">✕</button>
+      </div>
+      <div class="settings-body">
+        <label class="setting-row">
+          <span>model</span>
+          <select id="s-model"></select>
+        </label>
+        <div class="setting-row">
+          <span>sentences <b id="s-sent-range">1 – 5</b></span>
+          <div class="range-pair">
+            <input type="range" id="s-sent-min" min="1" max="10" value="1" title="min sentences">
+            <input type="range" id="s-sent-max" min="1" max="10" value="5" title="max sentences">
+          </div>
+        </div>
+        <div class="setting-row">
+          <span>words <b id="s-words-range">15 – 100</b></span>
+          <div class="range-pair">
+            <input type="range" id="s-words-min" min="5" max="200" step="5" value="15" title="min words">
+            <input type="range" id="s-words-max" min="5" max="200" step="5" value="100" title="max words">
+          </div>
+        </div>
+        <label class="setting-row">
+          <span>session length <b id="s-session-val">10</b> min</span>
+          <input type="range" id="s-session" min="2" max="20" step="1" value="10">
+        </label>
+        <label class="setting-row">
+          <span>TTS voice</span>
+          <input type="checkbox" id="s-tts" checked>
+        </label>
+        <button type="button" class="save-btn" id="settings-save">apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODEL LOADING OVERLAY -->
+  <div id="model-loading" class="model-loading hidden">
+    <div class="loading-card">
+      <div class="loading-spinner" id="loading-spinner"></div>
+      <div id="loading-label">loading model…</div>
+      <button type="button" id="loading-retry" class="save-btn hidden">retry</button>
+    </div>
+  </div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

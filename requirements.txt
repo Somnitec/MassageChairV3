@@ -1,0 +1,9 @@
+# Phase 1 (simulation) has ZERO runtime dependencies — it talks to Ollama over
+# HTTP using only the Python standard library, so it runs unchanged on the
+# dependency-light LattePanda deploy box.
+#
+# Ollama itself must be running locally (or reachable at config.OLLAMA_HOST)
+# with the models in config.MODELS pulled.
+#
+# Phases 2/3 will add hardware deps (kept out of the core on purpose):
+#   pyserial   # rfc2217 bridge to the Arduino over serial
