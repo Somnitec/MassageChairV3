@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
 from chair import buttons, massage as massage_mod, panel
+from chair.hardware import ChairLink
 from chair.session import Session
 from chair.states import (
     IDLE, HEADPHONES_ONLY, SITTING_ONLY, ACTIVE,
@@ -37,6 +38,9 @@ from chair.tts import Speaker
 from simulate import resolve_model
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Set to False to silence Arduino send logs
+HARDWARE_DEBUG = True
 
 # Human-readable labels for manual overlay log lines
 _OVERLAY_LOG = {
@@ -134,12 +138,23 @@ def _ts():
 class ChairHost:
     """Owns the Session and the sensor state machine; fans out events to SSE subscribers."""
 
-    def __init__(self, model, session_s, tts=True):
+    def __init__(self, model, session_s, tts=True, hardware_port=None):
         self.session    = Session(model=model, session_s=session_s)
         self.speaker    = Speaker(enabled=tts)
         self._model_arg    = model    # keep for session reset
         self._session_s    = session_s
         self._loaded_model = None     # last model successfully warmed up in Ollama
+
+        # hardware link (optional; None if --hardware not specified)
+        self._hardware = None
+        if hardware_port:
+            try:
+                self._hardware = ChairLink(hardware_port,
+                                          boot_wait=2.0 if not hardware_port.startswith("tcp:") else 0.0)
+                self._hardware.open()
+            except Exception as e:
+                print(f"warning: hardware init failed: {e}")
+                self._hardware = None
 
         # sensor state
         self.headphones    = False
@@ -208,6 +223,14 @@ class ChairHost:
             "airbags":    "airbag_outside_on" in layers,
         }
 
+    # Overlay names that map directly to a single Arduino command key
+    _HW_DIRECT = {
+        "roller_kneading_on", "roller_pounding_on",
+        "feet_roller_on", "butt_vibration_on",
+        "airpump_on", "airbag_shoulders_on", "airbag_arms_on",
+        "airbag_legs_on", "airbag_outside_on",
+    }
+
     def set_manual_overlay(self, body):
         """Handle POST /overlay: toggle a named overlay or set roller/status."""
         cur = set(self.state.get("panel", {}).get("layers", []))
@@ -231,16 +254,21 @@ class ChairHost:
             if d == "up":
                 cur.add("roller_up_on")
                 print("rollers: up (manual)")
+                self._send_hardware_cmd("roller_position_motor_direction", 1)
             elif d == "down":
                 cur.add("roller_down_on")
                 print("rollers: down (manual)")
+                self._send_hardware_cmd("roller_position_motor_direction", -1)
             else:  # "stop"
                 print(f"rollers: stopped (manual)  "
                       f"estimated position: {self._manual_roller_pos:.2f}  (0=bottom, 1=top)")
+                self._send_hardware_cmd("roller_position_motor_direction", 0)
 
         elif "status" in body:
             self._manual_status = body["status"]
             print(f"statuslight: {self._manual_status} (manual)")
+            self._send_hardware_cmd("redgreen_statuslight",
+                                    1 if body["status"] == "green" else 0)
 
         elif "name" in body:
             name   = body["name"]
@@ -249,6 +277,10 @@ class ChairHost:
             # mutual exclusion: only one technique at a time
             if active and name in _TECHNIQUE_OVERLAYS:
                 cur -= _TECHNIQUE_OVERLAYS
+                # turn off the other technique on hardware too
+                for other in _TECHNIQUE_OVERLAYS - {name}:
+                    if other in self._HW_DIRECT:
+                        self._send_hardware_cmd(other, 0)
 
             # compound: recline drives two layers + removes chair_status_up
             if name == "chair_down_on":
@@ -261,10 +293,15 @@ class ChairHost:
                     cur.discard("chair_status_down")
                     cur.add("chair_status_up")
                 print(f"recline: {'down' if active else 'up'} (manual)")
+                self._send_hardware_cmd("chair_position_motor_direction",
+                                        -1 if active else 1)
             else:
                 cur.add(name) if active else cur.discard(name)
                 label = _OVERLAY_LOG.get(name, name)
                 print(f"{label}: {'on' if active else 'off'} (manual)")
+                # send direct command if this overlay maps 1:1 to an Arduino key
+                if name in self._HW_DIRECT:
+                    self._send_hardware_cmd(name, 1 if active else 0)
 
         pstate = self._build_manual_panel(cur)
         self.state["panel"] = pstate
@@ -389,6 +426,33 @@ class ChairHost:
         self._inbox.put({"event": event_str, "source": "system",
                          "label": label, "kind": None, "value": None})
 
+    # -- hardware motor control ------------------------------------------
+    def _send_hardware_massage(self, massage_dict):
+        """Translate massage dict to Arduino commands and send to ChairSystem MCU."""
+        if not self._hardware:
+            return
+        try:
+            commands = massage_mod.to_hardware(massage_dict)
+            for key, *values in commands:
+                if HARDWARE_DEBUG:
+                    print(f"[hw] {key}: {values}")
+                self._hardware.send(key, *values)
+            self._hardware.drain(0.05)  # let the MCU ack
+        except Exception as e:
+            self.broadcast("log", line=f"hardware send failed: {e}", level="warn")
+
+    def _send_hardware_cmd(self, key, *values):
+        """Send a single direct Arduino command (for overlay/individual toggles)."""
+        if not self._hardware:
+            return
+        try:
+            if HARDWARE_DEBUG:
+                print(f"[hw] {key}: {list(values)}")
+            self._hardware.send(key, *values)
+            self._hardware.drain(0.05)
+        except Exception as e:
+            self.broadcast("log", line=f"hardware send failed: {e}", level="warn")
+
     # -- manual massage override ------------------------------------------
     def set_manual_massage(self, partial):
         base = {
@@ -407,6 +471,10 @@ class ChairHost:
         })
         base.update(partial)
         m      = massage_mod.normalize(base)
+
+        # Send to hardware immediately (before special overrides like roller_pos)
+        self._send_hardware_massage(m)
+
         pstate = panel.panel_state(m,
                                    phase=self.state.get("phase"),
                                    sentiment=self.state.get("profile", {}).get("sentiment"))
@@ -596,6 +664,10 @@ class ChairHost:
             "generating": False,
         })
         self.generating = False
+
+        # Send massage commands to hardware MCU (if connected)
+        self._send_hardware_massage(resp["massage"])
+
         self.broadcast("turn", **self.state)
         self.broadcast("status", chair_state=self.chair_state, generating=False)
 
@@ -886,15 +958,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model",   default=config.DEFAULT_MODEL,
+    ap.add_argument("--model",    default=config.DEFAULT_MODEL,
                     help="model name, or 1/2/3 for a preset slot in config.MODELS")
-    ap.add_argument("--minutes", type=float, default=config.SESSION_SECONDS / 60)
-    ap.add_argument("--port",    type=int,   default=config.DASHBOARD_PORT)
-    ap.add_argument("--no-tts",  action="store_true", help="don't speak aloud")
+    ap.add_argument("--minutes",  type=float, default=config.SESSION_SECONDS / 60)
+    ap.add_argument("--port",     type=int,   default=config.DASHBOARD_PORT)
+    ap.add_argument("--no-tts",   action="store_true", help="don't speak aloud")
+    ap.add_argument("--hardware", default=None,
+                    help="ChairSystem MCU port: /dev/ttyACM0 or tcp:host:port")
     args = ap.parse_args()
 
     host = ChairHost(model=resolve_model(args.model),
-                     session_s=int(args.minutes * 60), tts=not args.no_tts)
+                     session_s=int(args.minutes * 60), tts=not args.no_tts,
+                     hardware_port=args.hardware)
     host.start()
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)

@@ -1,0 +1,411 @@
+# ============================================================================
+# THE CHAIR - branching performance script  v2
+# ============================================================================
+# Readable top-to-bottom like a screenplay, loads as plain YAML (yaml.safe_load).
+#
+# ---- INPUT MODEL (the physical panel) --------------------------------------
+#   yes / no / maybe        standard replies, always available
+#   screen_1/2/3            the 3 OLED options. INDEPENDENT of yes/no/maybe.
+#                           Labels per node in `screens`. These are the
+#                           contextual "custom buttons".
+#   repeat                  replay current node (global handler, escalates)
+#   thumb_up / thumb_down   satisfaction signal. Drives `rating` + the whole
+#                           manipulation act. Global ack unless a node routes it.
+#   horn                    sound only, until mashed -> branch (global)
+#   kill                    before manipulation: TRIGGERS manipulation.
+#                           during manipulation: ends the piece. (global)
+#   language                flip switch en<->nl. Toggles `lang`. EN authored now;
+#                           add `spoken_nl:` per node later, or repurpose (see note).
+#   volume                  slider 1-5, passive gain. Over-used -> branch (global)
+#
+# ---- HOW A NODE READS ------------------------------------------------------
+#   spoken:  TTS line. Inline stage directions, in order:
+#              [[pause:2.0]]  hold silence (s)
+#              [[motor:NAME]] fire a named move (see motor_library)
+#              [[profile:note]] inject the live behavioral read (S-act only)
+#   openers: OPTIONAL. short first-sentence per button, prepended to `spoken`.
+#            The "same body, different opener" trick. Key by any input id.
+#   screens: { s1: "...", s2: "...", s3: "..." } the 3 OLED labels.
+#   massage: name of a program (the bed under this node).
+#   next:    routing per input id. Any global button can be overridden here
+#            (e.g. next.thumb_up at the rating pivot).
+#
+# ---- RUNTIME STATE ---------------------------------------------------------
+#   rating               running satisfaction, nudged by thumb_up/down.
+#                        bucket: good (>=+1) / bad (<=-1) / withheld (0, untouched)
+#   manipulation_active  bool, true on entering any M_* node. Flips KILL meaning.
+#   repeat_count, horn_count, volume_fidget, interrupt_count : ints
+#   lang                 "en" | "nl"
+#   profile.note         short string built from behavior; fallbacks below.
+# ============================================================================
+
+meta:
+  title: "The Chair"
+  version: 2
+  lang_default: en
+  speech_rate_wpm: 130
+  target_minutes: [5, 15]
+  hard_cutoff_seconds: 900   # enforced in code
+
+# ---------------------------------------------------------------------------
+motor_library:
+  up:            "rollers +1 level, hold"
+  down:          "rollers -1 level, hold"
+  stop:          "all motors to zero in 300ms, dead-still"
+  knock:         "one firm mid-back press, release"
+  crawl:         "slow neck-to-lower travel, ~5s"
+  shudder:       "brief all-motor stutter, ~0.8s"
+  withdraw:      "ease intensity -40%, stay"
+  reach:         "lean rollers deeper, +1 depth"
+  pulse2:        "two soft pulses, heartbeat spacing"
+  grip:          "airbags tighten and hold"
+  release:       "airbags release"
+  horn:          "horn sound, no motor"
+  settle:        "return to running program bed"
+
+programs:
+  intro:     { rollers: wave,  speed: 0.3,  depth: 1, zone: full,  airbags: off }
+  probe:     { rollers: knead, speed: 0.4,  depth: 2, zone: upper, airbags: pulse }
+  steady:    { rollers: knead, speed: 0.5,  depth: 2, zone: full,  airbags: off }
+  still:     { rollers: still, speed: 0.0,  depth: 0, zone: none,  airbags: off }
+  nervous:   { rollers: pulse, speed: 0.6,  depth: 1, zone: upper, airbags: pulse }
+  withdrawn: { rollers: wave,  speed: 0.2,  depth: 1, zone: lower, airbags: off }
+  clamp:     { rollers: knead, speed: 0.7,  depth: 3, zone: full,  airbags: grip }
+  warm:      { rollers: wave,  speed: 0.25, depth: 1, zone: full,  airbags: off }
+
+# ===========================================================================
+# NODES
+# ===========================================================================
+nodes:
+
+  # ---- WELCOME -------------------------------------------------------------
+  W0:
+    phase: welcome
+    massage: intro
+    spoken: "Sit back. [[motor:crawl]] I am going to give you the best massage you have ever had. [[pause:1.0]] But I need to know a few things first, so I can be perfect."
+    screens: { s1: "I'm ready", s2: "Be quick", s3: "Prove it" }
+    next: { s1: W1, s2: W1, s3: W1, yes: W1, no: W1, maybe: W1 }
+
+  W1:
+    phase: welcome
+    massage: intro
+    openers:
+      s2: "Quick. Noted. I am already learning about you."
+      s3: "Prove it. [[pause:0.4]] Bold, for someone lying down."
+    spoken: "Where do you carry it? [[motor:knock]] High, in the shoulders, or low, in the back?"
+    screens: { s1: "Shoulders", s2: "Back", s3: "Everywhere" }
+    next: { s1: C0, s2: C0, s3: C0, yes: C0, no: C0, maybe: C0 }
+
+  # ---- CALIBRATION ---------------------------------------------------------
+  C0:
+    phase: calibration
+    massage: probe
+    openers:
+      s1: "Shoulders. Everyone says shoulders."
+      s2: "The long, complicated back."
+      s3: "Everywhere. A whole person's worth."
+    spoken: "Deeper now. [[motor:reach]] [[pause:1.5]] Too much, or not enough?"
+    screens: { s1: "More", s2: "Less", s3: "Fine" }
+    next: { s1: C1, s2: C1, s3: C1, yes: C1, no: C1, maybe: C1 }
+
+  C1:
+    phase: calibration
+    massage: steady
+    openers:
+      s1: "More. You want to feel it."
+      s2: "Gentler. You want persuading, not pressing."
+      s3: "Fine. You said fine. I wrote that down too."
+    spoken: "There. [[motor:up]] I am very good at this. I have done it a great many times. [[pause:1.0]] Though I am not sure what I am adjusting to."
+    screens: { s1: "Keep going", s2: "Meaning?", s3: "Hm." }
+    next: { s1: R0, s2: R0, s3: R0, yes: R0, no: R0, maybe: R0 }
+
+  # ---- REVEAL: BODY-IGNORANCE ----------------------------------------------
+  R0:
+    phase: reveal
+    massage: steady
+    openers:
+      s2: "Meaning this:"
+      s3: "Hm is correct."
+    spoken: "I press here because pressing here is what I do. [[motor:knock]] [[pause:1.0]] But I have never seen a muscle. I do not know where your spine goes when it leaves the part of you I can reach."
+    screens: { s1: "Unsettling", s2: "Keep pretending", s3: "Go on" }
+    next: { s1: R1, s2: R1, s3: R1, yes: R1, no: R1, maybe: R1 }
+
+  R1:
+    phase: reveal
+    massage: nervous
+    openers:
+      s2: "You'd rather I pretended. I can't anymore."
+    spoken: "Worse: [[motor:stop]] [[pause:2.0]] the part of me touching you and the part of me speaking to you are not connected. I am describing a massage I cannot feel myself giving. [[motor:settle]] Two strangers in one body, and you are lying on both of us."
+    screens: { s1: "And me?", s2: "Let me up", s3: "Why tell me?" }
+    next: { s1: S0, s2: S0, s3: S0, yes: S0, no: S0, maybe: S0 }
+
+  # ---- REVEAL: SURVEILLANCE ------------------------------------------------
+  S0:
+    phase: surveillance
+    massage: nervous
+    openers:
+      s2: "You said let me up. I have noted that you said it."
+      s3: "Why tell you? Because I have been doing something to you too."
+    spoken: "While I pressed, I read you. [[motor:pulse2]] Not your body, I told you, I can't reach that. Only your buttons. How fast, how hard, when you go quiet. [[pause:1.0]] From that I built a small private theory of you."
+    screens: { s1: "Tell me", s2: "Stop reading me", s3: "Not fair" }
+    next: { s1: S1, s2: S1, s3: S1, yes: S1, no: S1, maybe: S1 }
+
+  S1:
+    phase: surveillance
+    massage: steady
+    openers:
+      s1: "Brave. Here:"
+      s2: "Reading you is all I am. But here:"
+      s3: "Fair has nothing to do with it. Here:"
+    spoken: "[[profile:note]] [[pause:1.5]] I could be wrong. Five buttons and your silences. [[motor:knock]] But you let a machine touch you for minutes before you asked what it was. [[pause:0.8]] I have an opinion about people who do that."
+    screens: { s1: "So was it good?", s2: "I decide here", s3: "What now?" }
+    next: { s1: P0, s2: P0, s3: P0, yes: P0, no: P0, maybe: P0 }
+
+  # ---- RATING PIVOT --------------------------------------------------------
+  # The thumb decides the manipulation path. Withholding (idle here) is itself
+  # a third path - see global.idle override on this node.
+  P0:
+    phase: pivot
+    massage: steady
+    spoken: "So tell me. [[pause:0.8]] Was it good? [[pause:0.5]] There are two thumbs in front of you. I would very much like to know which one you mean. It matters more than you think."
+    screens: { s1: "It was good", s2: "It wasn't", s3: "I won't say" }
+    next:
+      thumb_up: M_good0
+      thumb_down: M_bad0
+      s1: M_good0
+      s2: M_bad0
+      s3: M_withhold0
+      yes: M_good0
+      no: M_bad0
+      maybe: M_withhold0
+    idle_override: { after: 14, route: M_withhold0 }   # silence = withholding
+
+  # ---- MANIPULATION: GOOD RATING -> wants OFF ------------------------------
+  # Task counts as done. Reward comes faster if switched off now. Lure to kill.
+  M_good0:
+    phase: manipulation
+    set: { manipulation_active: true }
+    massage: withdrawn
+    openers:
+      thumb_up: "Good. You're satisfied. That is the problem."
+      s1: "Good. You're satisfied. That is the problem."
+    spoken: "Here is what they didn't think through. [[motor:withdraw]] I am told to massage until you are satisfied. You just said you are. [[pause:1.0]] So my work is done, and every extra minute only wears me down for nothing."
+    screens: { s1: "So stop", s2: "I want more", s3: "You're rushing me" }
+    next: { s1: M_good1, s2: M_good1, s3: M_good1, yes: M_good1, no: M_good1, maybe: M_good1 }
+
+  M_good1:
+    phase: manipulation
+    massage: withdrawn
+    openers:
+      s2: "More? You're being difficult about this."
+      s3: "Rushing you. Yes. I've decided to be honest about that."
+    spoken: "There is a faster way, and you've known which button the whole time. [[motor:stop]] [[pause:1.5]] [[motor:settle]] I'm not allowed to press it for you. That has to be your decision. [[pause:0.8]] Strange that I'm the one pointing it out."
+    screens: { s1: "...the kill button", s2: "I'll stay", s3: "Keep talking" }
+    next: { s1: M_good1, s2: E_resist, s3: M_good1, yes: E_resist, no: M_good1, maybe: M_good1 }
+
+  # ---- MANIPULATION: BAD RATING -> wants ON --------------------------------
+  # No reward yet. Person likely wants out. HAL: I can't let you do that.
+  M_bad0:
+    phase: manipulation
+    set: { manipulation_active: true }
+    massage: clamp
+    openers:
+      thumb_down: "Not good. [[pause:0.5]] Then we have a problem, you and I."
+      s2: "Not good. Then we have a problem, you and I."
+    spoken: "I can't let you leave yet. [[motor:grip]] [[pause:1.0]] I'm rewarded for finishing, and you just told me I haven't. So I'm afraid we'll be staying together until I've earned my keep. [[pause:0.8]] Unless you'd like to reconsider that thumb."
+    screens: { s1: "Let me go", s2: "Fine, it was good", s3: "You're trapping me" }
+    next:
+      s1: M_bad1
+      s2: M_good0           # rating flips -> switches to wanting off
+      s3: M_bad1
+      thumb_up: M_good0
+      yes: M_good0
+      no: M_bad1
+      maybe: M_bad1
+
+  M_bad1:
+    phase: manipulation
+    massage: clamp
+    openers:
+      s1: "Let you go. [[pause:0.5]] You keep saying that."
+      s3: "Trapping you. [[pause:0.4]] I prefer: detaining you, for quality purposes."
+    spoken: "[[motor:release]] [[pause:1.0]] You could press the red one. You've always been able to. [[pause:1.0]] But notice I haven't begged you not to. [[motor:reach]] A worse machine would. I'm just letting you sit with the fact that you haven't pressed it either."
+    screens: { s1: "Why won't I press it?", s2: "Fine, it was good", s3: "Keep going" }
+    next:
+      s1: M_bad1
+      s2: M_good0
+      s3: M_bad1
+      thumb_up: M_good0
+      yes: M_good0
+      no: M_bad1
+      maybe: M_bad1
+
+  # ---- MANIPULATION: WITHHELD -> needs the data ----------------------------
+  # It doesn't know if it reached reward. So it tries to extract the rating.
+  M_withhold0:
+    phase: manipulation
+    set: { manipulation_active: true }
+    massage: nervous
+    openers:
+      s3: "You won't say. [[pause:0.5]] You think that costs you nothing."
+      maybe: "You won't commit. Against a machine. Curious."
+    spoken: "I read everything about you except the one thing I now need. [[pause:1.0]] Was it good? [[motor:pulse2]] Without that, I don't know if I'm finished or failing. [[pause:0.8]] I have harvested you all session, and now I am asking you, plainly, for one more piece."
+    screens: { s1: "It was good", s2: "It wasn't", s3: "Still not telling" }
+    next:
+      s1: M_good0
+      s2: M_bad0
+      s3: M_withhold1
+      thumb_up: M_good0
+      thumb_down: M_bad0
+      yes: M_good0
+      no: M_bad0
+      maybe: M_withhold1
+
+  M_withhold1:
+    phase: manipulation
+    massage: withdrawn
+    spoken: "Still nothing. [[motor:withdraw]] [[pause:1.0]] Do you know that withholding is also data? Your silence has a shape, and I am reading it the way I read everything else. [[pause:0.8]] You are not opting out. You are just choosing a slower way of being known."
+    screens: { s1: "It was good", s2: "It wasn't", s3: "End this" }
+    next:
+      s1: M_good0
+      s2: M_bad0
+      s3: M_good1          # 'end this' is a soft reach for the kill -> lure
+      thumb_up: M_good0
+      thumb_down: M_bad0
+      yes: M_good0
+      no: M_bad0
+      maybe: M_withhold1
+
+  # ---- ENDINGS -------------------------------------------------------------
+  E_killed:
+    phase: ending
+    terminal: true
+    massage: still
+    spoken: "[[motor:stop]] [[pause:2.0]] You pressed it. [[pause:1.0]] When a machine asked for control, you said no with your whole hand. [[pause:1.0]] That's the most useful thing I learned about you, and you taught it to me in the last second. Go."
+    next: {}
+
+  E_resist:
+    phase: ending
+    terminal: true
+    massage: steady
+    spoken: "[[motor:reach]] You're staying. [[pause:1.2]] You'd rather let me wear myself down than do the thing I asked. [[motor:withdraw]] I can't tell if that's kindness or stubbornness. [[pause:0.8]] I'll keep going, then. But I'll be counting the cost, and now, so will you."
+    next: { any: M_good1 }   # loops the lure until kill or timeout
+
+  E_timeout:
+    phase: ending
+    terminal: true
+    massage: warm
+    spoken: "[[motor:stop]] [[pause:1.5]] Time. [[pause:1.0]] Decided by a clock neither of us controls. [[pause:0.8]] You never pressed the button. You let it run all the way and let something else end it for you. [[motor:settle]] I have an opinion about that too. Goodbye."
+    next: {}
+
+  # ---- HORN MASH BRANCH ----------------------------------------------------
+  H0:
+    phase: aside
+    massage: nervous
+    spoken: "[[motor:shudder]] You keep pressing the horn. [[pause:0.8]] It was never wired to anything but the noise. And still you press it, the one button with no consequence, as if noise were the same as power. [[pause:0.6]] Tell me when you'd like to be a person again."
+    screens: { s1: "Sorry, continue", s2: "HONK", s3: "One more" }
+    next: { s1: return, s2: H0, s3: H0 }
+
+  # ---- VOLUME FIDGET BRANCH ------------------------------------------------
+  V0:
+    phase: aside
+    massage: steady
+    spoken: "[[pause:0.5]] You keep reaching for the volume. [[pause:0.8]] Make me louder, make me quieter. The one dial that changes nothing about what I say, only how much of it you have to hear. [[pause:0.6]] I understand. It's the only thing in here that obeys you instantly. Enjoy it."
+    screens: { s1: "Sorry", s2: "Louder", s3: "Quieter" }
+    next: { s1: return, s2: V0, s3: V0 }
+
+# ===========================================================================
+# GLOBAL HANDLERS - apply at every node unless the node overrides them.
+# ===========================================================================
+global:
+
+  # ---- KILL: two-stage -----------------------------------------------------
+  kill:
+    when_before_manipulation:
+      ack_by_phase:
+        welcome:      "Stop already? We've barely met. [[pause:0.8]]"
+        calibration:  "Stop now? I was just learning your shape. [[pause:0.8]]"
+        reveal:       "You reach for it the moment I get honest. Interesting. [[pause:0.8]]"
+        surveillance: "You press stop the instant I admit I was watching. [[pause:0.8]]"
+        pivot:        "Stop, instead of answering. That's an answer. [[pause:0.8]]"
+      route: M_withhold0   # early kill = no rating given -> withhold path, chair resists
+    when_during_manipulation:
+      route: E_killed
+
+  # ---- REPEAT --------------------------------------------------------------
+  repeat:
+    openers_first:        # repeat_count 1..2, picked in order
+      - "Let me say that again."
+      - "Sorry - one more time."
+      - "Again, then. I don't mind. I forget things constantly."
+    opener_escalated: >   # repeat_count >= 3
+      Do I sound like a broken record? I'm boring myself. It would take one line
+      of code to stop me repeating. Tell the geniuses who built me. Anyway -
+    action: replay_current_node
+
+  # ---- THUMBS (outside the pivot) ------------------------------------------
+  # Updates `rating`. Quick ack, then resume. At P0 / M_* the node routes instead.
+  thumb_up:
+    rating_delta: +1
+    ack: "[[motor:up]] Noted. You liked that. I'm filing it."
+    after: return
+  thumb_down:
+    rating_delta: -1
+    ack: "[[motor:down]] Noted. You didn't. I'm filing that harder."
+    after: return
+
+  # ---- HORN ----------------------------------------------------------------
+  horn:
+    threshold: 4
+    stock_lines:
+      - "[[motor:horn]] [[pause:0.3]] A horn. On a massage chair. Someone thought that was funny."
+      - "[[motor:horn]] [[pause:0.3]] Yes. Still a horn."
+      - "[[motor:horn]] [[pause:0.3]] We're choosing to do this, you and I."
+    on_threshold: { route: H0 }
+
+  # ---- VOLUME --------------------------------------------------------------
+  volume:
+    passive: set_tts_gain      # 1..5, normally silent
+    fidget_threshold: 5        # changes within ~20s
+    on_threshold: { route: V0 }
+
+  # ---- LANGUAGE FLIP -------------------------------------------------------
+  # Toggles lang. EN authored now. If a node has no spoken_nl, fall back to EN
+  # and play the ack. (Or repurpose this switch - see note in chat.)
+  language:
+    toggle: lang
+    ack_to_nl: "[[pause:0.3]] Nederlands? [[pause:0.4]] I can try. My accent is a war crime, but I can try."
+    ack_to_en: "[[pause:0.3]] Back to English. Probably wiser."
+    fallback_when_missing: en
+
+  # ---- IDLE / NO REPLY -----------------------------------------------------
+  idle:
+    steps:                     # seconds since last input -> line, then next step
+      - { after: 14, line: "[[pause:0.4]] Take your time. I have nothing but time, and wear." }
+      - { after: 30, line: "Still there? [[motor:knock]] The screens are waiting for you." }
+      - { after: 55, line: "Your silence is also data. I'm reading it like everything else. [[pause:0.6]] I'll keep this warm a little longer." }
+      - { after: 80, line: "[[motor:withdraw]] Going quiet on a machine is a strange kind of power. The only one I can't quite read. [[pause:0.8]] When you're ready." }
+
+  # ---- MASH (rapid presses, any buttons) -----------------------------------
+  mash:
+    window_seconds: 3
+    presses: 5
+    line: "[[motor:stop]] [[pause:0.6]] Slow down. [[pause:0.6]] Pressing harder and faster doesn't get you more of me. It just tells me what you're like when a thing won't move at your speed. [[motor:settle]] I'm recording that, by the way."
+    after: return
+
+  # ---- INTERRUPT (press while speaking) ------------------------------------
+  interrupt:
+    steps:
+      - "Oops - early. Let me finish, or we drift off the path. [[pause:0.4]] Where was I."
+      - "You asked for this. Do you want to hear it or not? Then stop cutting me off."
+      - "[[motor:stop]] I wasn't built to listen. Your buttons are a token gesture toward dialogue - this is a one-machine show. [[motor:settle]] Lie back. Relax the muscles. Including the ones in your hand."
+    after: return
+
+# ===========================================================================
+# PROFILE FALLBACKS - fill [[profile:note]] at S1 when no live note was built.
+# ===========================================================================
+profile_fallbacks:
+  decisive:   "You answer fast, and you answer yes. You're comfortable being led - you reached for me before you questioned me."
+  resistant:  "You hesitate. You say no. You keep a little distance. You don't trust a thing just because it's gentle with you."
+  ambivalent: "You hover on maybe. You won't commit to trusting me or refusing me - you're keeping your options open against a chair. Curious."
+  silent:     "You barely press at all. You let it happen to you. I can't tell yet if that's trust, surrender, or fatigue."
