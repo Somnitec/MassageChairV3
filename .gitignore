@@ -49,3 +49,6 @@ htmlcov/
 # Temporary
 *.tmp
 *.log
+
+# PlatformIO
+.pio/

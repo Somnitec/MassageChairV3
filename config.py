@@ -10,7 +10,7 @@ OLLAMA_HOST = "http://localhost:11434"
 
 # Models we are A/B-ing for voice / tone / depth vs. speed.
 # gemma3 = best persona but slowest; qwen3/phi4 = faster, weaker voice.
-MODELS = ["gemma3:4b", "qwen3:4b", "phi4-mini:latest"]
+MODELS = ["gemma3:4b", "qwen3:4b", "phi4-mini:latest", "script:v2"]
 DEFAULT_MODEL = "gemma3:4b"
 
 TEMPERATURE = 0.85

@@ -39,7 +39,6 @@ const HOTSPOT_OVERLAY = {
   airbags:    "airbag_outside_on",
   airpump:    "airpump_on",
   vibration:  "butt_vibration_on",
-  recline:    "chair_down_on",
 };
 
 // model loading state
@@ -342,7 +341,7 @@ function wireHotspots() {
     let   rollerTrackRect = null;
 
     document.querySelectorAll(".hotspot").forEach((hs) => {
-      if (hs.dataset.rollerDir) return;   // hold buttons — handled separately
+      if (hs.dataset.rollerDir || hs.dataset.chairDir) return;   // hold buttons — handled separately
       const r = hs.getBoundingClientRect();
       if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) return;
 
@@ -425,6 +424,85 @@ function _stopRollerHold() {
   _rollerHoldDir = 0;
 }
 
+// --- chair up/down hold buttons -----------------------------------------
+let _chairHoldRaf  = null;
+let _chairHoldDir  = 0;    // -1 = up (toward raised), +1 = down (toward reclined)
+let _chairHoldEl   = null;
+let _chairLastTick = 0;
+let manualChairPos = 0.0;  // 0 = fully up, 1 = fully down
+
+// Fraction of full travel per second while holding (chair takes ~15s to fully recline)
+const CHAIR_SPEED_PER_SEC = 0.07;
+
+function _updateChairPosUI() {
+  const slider = $("#chair-pos-slider");
+  const label  = $("#chair-pos-label");
+  if (slider) slider.value = Math.round(manualChairPos * 100);
+  if (label)  label.textContent = manualChairPos <= 0.01 ? "up" : `${Math.round(manualChairPos * 100)}% down`;
+}
+
+function _chairTick(ts) {
+  if (!_chairHoldDir) return;
+  const dt = _chairLastTick ? Math.min((ts - _chairLastTick) / 1000, 0.1) : 0;
+  _chairLastTick = ts;
+  manualChairPos = Math.max(0, Math.min(1, manualChairPos + _chairHoldDir * CHAIR_SPEED_PER_SEC * dt));
+  _updateChairPosUI();
+  _chairHoldRaf = requestAnimationFrame(_chairTick);
+}
+
+function _startChairHold(el, dir) {
+  _stopChairHold();
+  _chairHoldDir  = dir;
+  _chairHoldEl   = el;
+  _chairLastTick = 0;
+  el.classList.add("hs-held");
+  postOverlay({ chair_dir: dir < 0 ? "up" : "down" });
+  _chairHoldRaf = requestAnimationFrame(_chairTick);
+}
+
+function _stopChairHold() {
+  if (!_chairHoldDir) return;
+  cancelAnimationFrame(_chairHoldRaf);
+  _chairHoldRaf = null;
+  if (_chairHoldEl) { _chairHoldEl.classList.remove("hs-held"); _chairHoldEl = null; }
+  postOverlay({ chair_dir: "stop", chair_pos: manualChairPos });
+  _chairHoldDir = 0;
+}
+
+function wireChairButtons() {
+  document.querySelectorAll(".hotspot[data-chair-dir]").forEach((el) => {
+    const dir = el.dataset.chairDir === "up" ? -1 : 1;
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      _startChairHold(el, dir);
+    });
+    el.addEventListener("pointerup",     _stopChairHold);
+    el.addEventListener("pointercancel", _stopChairHold);
+  });
+  window.addEventListener("pointerup", _stopChairHold);
+}
+
+// --- PWM speed sliders --------------------------------------------------
+function wirePwmSliders() {
+  const defs = [
+    ["pwm-knead", "pwm-knead-val", "pwm_kneading"],
+    ["pwm-pound", "pwm-pound-val", "pwm_pounding"],
+    ["pwm-feet",  "pwm-feet-val",  "pwm_feet"],
+  ];
+  for (const [sliderId, valId, key] of defs) {
+    const slider = document.getElementById(sliderId);
+    const valEl  = document.getElementById(valId);
+    if (!slider) continue;
+    slider.addEventListener("input", () => {
+      if (valEl) valEl.textContent = slider.value;
+    });
+    slider.addEventListener("change", () => {
+      postOverlay({ [key]: +slider.value });
+    });
+  }
+}
+
 function wireRollerButtons() {
   document.querySelectorAll(".hotspot[data-roller-dir]").forEach((el) => {
     const dir = el.dataset.rollerDir === "up" ? -1 : 1;
@@ -477,16 +555,39 @@ function _updateApplyBtn() {
 }
 
 // --- settings panel -----------------------------------------------------
+function _updateScriptVisibility(s) {
+  // Hide sentence/words/session settings if current model is a script
+  const isScript = s.is_script;
+  const rows = ["s-sent-row", "s-words-row", "s-session-row"];
+  rows.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle("hidden", isScript);
+  });
+  // Clear any error message
+  const errEl = document.getElementById("settings-error");
+  if (errEl) errEl.classList.add("hidden");
+}
+
 function _populateSettingsForm(s) {
-  // model dropdown
+  // model dropdown: LLM models + scripts
   const sel = $("#s-model");
   const prev = sel.value;
   sel.innerHTML = "";
+
+  // Add LLM models
   for (const m of (s.models || [])) {
     const o = document.createElement("option");
     o.value = m; o.textContent = m;
     sel.appendChild(o);
   }
+
+  // Add scripts (if any available)
+  for (const script of (s.scripts || [])) {
+    const o = document.createElement("option");
+    o.value = script; o.textContent = script;
+    sel.appendChild(o);
+  }
+
   // select: prefer current form value → localStorage → server default
   const local = _readLS();
   const want = prev || local.model || s.model;
@@ -499,6 +600,8 @@ function _populateSettingsForm(s) {
     }
     sel.value = want;
   }
+
+  _updateScriptVisibility(s);
 
   const lsSessionMin = local.session_s ? Math.round(local.session_s / 60) : null;
   const srvSessionMin = s.session_s ? Math.round(s.session_s / 60) : 10;
@@ -592,15 +695,30 @@ function saveSettings() {
     tts_enabled:   $("#s-tts").checked,
   };
   _writeLS(body);
+
+  // Post settings first to validate (especially script loading)
   fetch("/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  }).then(r => {
+    if (r.ok) {
+      // Trigger model load and show loading overlay only on success
+      showModelLoading(body.model);
+      fetch("/warmup", { method: "POST" }).catch(() => {});
+      $("#settings-overlay").classList.add("hidden");
+    } else {
+      // Error: display message and keep settings panel open
+      r.text().then(msg => {
+        const errEl = document.getElementById("settings-error");
+        if (errEl) {
+          // Extract error message from HTTP error response
+          errEl.textContent = msg || "Failed to apply settings";
+          errEl.classList.remove("hidden");
+        }
+      });
+    }
   }).catch(() => {});
-  // Trigger model load and show loading overlay
-  showModelLoading(body.model);
-  fetch("/warmup", { method: "POST" }).catch(() => {});
-  $("#settings-overlay").classList.add("hidden");
 }
 
 function sendPattern(name) {
@@ -611,11 +729,121 @@ function sendPattern(name) {
   }).catch(() => {});
 }
 
+// --- program box + timing sliders ----------------------------------------
+let _currentProgramParams = {};
+
+function renderProgram(e) {
+  const name = e.name || "—";
+  const desc = e.description || "";
+  $("#prog-name").textContent = name.replace(/_/g, " ");
+  $("#prog-desc").textContent = desc;
+
+  _currentProgramParams = e;
+
+  const fields = [
+    ["t-airbag-on",  "airbag_on_s",  e.airbag_on_s,  e.airbag_on_s],
+    ["t-airbag-off", "airbag_off_s", e.airbag_off_s, e.airbag_off_s],
+    ["t-butt-on",    "butt_on_s",    e.butt_on_s,    e.butt_on_s],
+    ["t-butt-off",   "butt_off_s",   e.butt_off_s,   e.butt_off_s],
+  ];
+  for (const [id, , defaultVal] of fields) {
+    const slider = document.getElementById(id);
+    const valEl  = document.getElementById(id + "-val");
+    const defEl  = document.getElementById(id + "-default");
+    if (!slider) continue;
+    const v = defaultVal ?? 0;
+    slider.value = v;
+    if (valEl)  valEl.textContent  = v.toFixed(1) + "s";
+    if (defEl)  defEl.textContent  = "(prog: " + v.toFixed(1) + "s)";
+  }
+}
+
+function wireTimingSliders() {
+  const defs = [
+    ["t-airbag-on",  "t-airbag-on-val",  "airbag_on_s"],
+    ["t-airbag-off", "t-airbag-off-val", "airbag_off_s"],
+    ["t-butt-on",    "t-butt-on-val",    "butt_on_s"],
+    ["t-butt-off",   "t-butt-off-val",   "butt_off_s"],
+  ];
+  for (const [sliderId, valId, key] of defs) {
+    const slider = document.getElementById(sliderId);
+    const valEl  = document.getElementById(valId);
+    if (!slider) continue;
+    slider.addEventListener("input", () => {
+      if (valEl) valEl.textContent = (+slider.value).toFixed(1) + "s";
+    });
+    slider.addEventListener("change", () => {
+      fetch("/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ program_overrides: { [key]: +slider.value } }),
+      }).catch(() => {});
+    });
+  }
+}
+
+// --- breathing tint animation -------------------------------------------
+let _breathPhase    = "off";
+let _breathRafId    = null;
+let _breathStart    = 0;
+let _breathDuration = 4.0;
+let _breathFromOp   = 0.35;
+let _breathToOp     = 1.0;
+
+function _breathTick(ts) {
+  if (!_breathStart) _breathStart = ts;
+  const t = Math.min(1, (ts - _breathStart) / (_breathDuration * 1000));
+  // sine ease for natural feel
+  const eased = 0.5 - 0.5 * Math.cos(t * Math.PI);
+  const op = _breathFromOp + (_breathToOp - _breathFromOp) * eased;
+  const tint = $("#backlight-tint");
+  if (tint) tint.style.opacity = op.toFixed(3);
+  if (t < 1) {
+    _breathRafId = requestAnimationFrame(_breathTick);
+  } else {
+    _breathRafId = null;
+  }
+}
+
+function onBreath(e) {
+  if (_breathRafId) { cancelAnimationFrame(_breathRafId); _breathRafId = null; }
+  _breathStart    = 0;
+  _breathDuration = e.phase === "inhale" ? (e.on_s  || 5) : (e.off_s || 8);
+  _breathFromOp   = e.phase === "inhale" ? 0.3  : 0.95;
+  _breathToOp     = e.phase === "inhale" ? 0.95 : 0.3;
+  _breathRafId    = requestAnimationFrame(_breathTick);
+}
+
+// --- program_step: reflect roller state driven by ProgramRunner -----------
+function onProgramStep(e) {
+  const knead = !!e.knead;
+  const pound = !!e.pound;
+  if (overlayEls["roller_kneading_on"])
+    overlayEls["roller_kneading_on"].classList.toggle("hidden", !knead);
+  if (overlayEls["roller_pounding_on"])
+    overlayEls["roller_pounding_on"].classList.toggle("hidden", !pound);
+  if (knead)  activeOverlays.add("roller_kneading_on"); else activeOverlays.delete("roller_kneading_on");
+  if (pound)  activeOverlays.add("roller_pounding_on"); else activeOverlays.delete("roller_pounding_on");
+  const techEl = $("#technique");
+  if (techEl) {
+    techEl.textContent = knead && pound ? "knead+pound" : knead ? "knead" : pound ? "pound" : "none";
+  }
+}
+
 function wireSettings() {
   $("#settings-btn").addEventListener("click", () => openSettings(false));
   $("#settings-close").addEventListener("click", (e) => closeSettings({ currentTarget: e.currentTarget }));
   $("#settings-overlay").addEventListener("click", closeSettings);
   $("#settings-save").addEventListener("click", saveSettings);
+
+  // Update visibility when model dropdown changes
+  $("#s-model").addEventListener("change", (e) => {
+    const isScript = e.target.value.startsWith("script:");
+    ["s-sent-row", "s-words-row", "s-session-row"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle("hidden", isScript);
+    });
+  });
 
   // Cancel countdown if user touches any control
   ["s-model", "s-sent-min", "s-sent-max", "s-words-min", "s-words-max",
@@ -701,6 +929,17 @@ function connect() {
           updateSensorUI(e.state.chair_state, !!e.state.headphones, !!e.state.sitting);
           setGenerating(!!e.state.generating);
         }
+        // populate the program box from settings (includes current program + params)
+        fetch("/settings").then(r => r.json()).then(s => {
+          if (s.program) {
+            renderProgram({
+              name: s.program,
+              description: s.program_description || "",
+              ...(s.program_params || {}),
+              ...(s.program_overrides || {}),
+            });
+          }
+        }).catch(() => {});
         break;
       case "status":
         setGenerating(!!e.generating);
@@ -745,11 +984,48 @@ function connect() {
       case "model_ready":
         hideModelLoading();
         break;
-      case "model_error":
-        $("#loading-label").textContent = `⚠ ${e.error || "load failed"}`;
+      case "model_error": {
+        const errMsg = e.error || "load failed";
+        $("#loading-label").textContent = `⚠ ${errMsg}`;
         $("#loading-label").style.color = "var(--red)";
         $("#loading-spinner").style.display = "none";
         $("#loading-retry").classList.remove("hidden");
+        const errEl = document.getElementById("settings-error");
+        if (errEl && !$("#settings-overlay").classList.contains("hidden")) {
+          errEl.textContent = errMsg;
+          errEl.classList.remove("hidden");
+        }
+        break;
+      }
+      case "breath":
+        onBreath(e);
+        break;
+      case "program_step":
+        onProgramStep(e);
+        break;
+      case "program":
+        renderProgram(e);
+        break;
+      case "program_overrides":
+        // Sliders that the user hasn't touched are left alone; just update display values
+        // for any override keys that came back from the server.
+        if (e.overrides) {
+          const map = {
+            airbag_on_s:  ["t-airbag-on",  "t-airbag-on-val"],
+            airbag_off_s: ["t-airbag-off", "t-airbag-off-val"],
+            butt_on_s:    ["t-butt-on",    "t-butt-on-val"],
+            butt_off_s:   ["t-butt-off",   "t-butt-off-val"],
+          };
+          for (const [key, [sliderId, valId]] of Object.entries(map)) {
+            if (key in e.overrides) {
+              const v = e.overrides[key];
+              const slider = document.getElementById(sliderId);
+              if (slider) slider.value = v;
+              const valEl = document.getElementById(valId);
+              if (valEl) valEl.textContent = (+v).toFixed(1) + "s";
+            }
+          }
+        }
         break;
     }
   };
@@ -759,6 +1035,9 @@ buildChair();
 wireControls();
 wireHotspots();
 wireRollerButtons();
+wireChairButtons();
+wirePwmSliders();
+wireTimingSliders();
 wireSettings();
 updateAreaLegend([]);
 connect();

@@ -51,8 +51,9 @@
           <div class="hotspot hs-airpump"        data-toggle="airpump"     title="Airpump "></div>
           <!-- butt vibration strip -->
           <div class="hotspot hs-butt-vibration" data-toggle="vibration"   title="Vibration"></div>
-          <!-- chair recline -->
-          <div class="hotspot hs-recline"      data-toggle="recline" title="Chair recline"></div>
+          <!-- chair up/down: hold to move -->
+          <div class="hotspot hs-chair-up"   data-chair-dir="up"   title="Chair up (hold)"></div>
+          <div class="hotspot hs-chair-down" data-chair-dir="down" title="Chair down (hold)"></div>
           <!-- red/green status light -->
           <div class="hotspot hs-statuslight"  data-toggle="status"  title="Status light"></div>
         </div>
@@ -77,6 +78,59 @@
           <div>areas: <b id="areas">—</b></div>
           <div>airbags: <b id="airbags">—</b></div>
           <div>LED: <b id="led">—</b> <span id="led-swatch" class="swatch"></span></div>
+        </div>
+
+        <h2 class="section-header">motor pwm</h2>
+        <div class="pwm-sliders">
+          <div class="pwm-row">
+            <label class="pwm-label">knead</label>
+            <input type="range" class="pwm-slider" id="pwm-knead" min="0" max="255" value="128">
+            <span class="pwm-val" id="pwm-knead-val">128</span>
+          </div>
+          <div class="pwm-row">
+            <label class="pwm-label">pound</label>
+            <input type="range" class="pwm-slider" id="pwm-pound" min="0" max="255" value="128">
+            <span class="pwm-val" id="pwm-pound-val">128</span>
+          </div>
+          <div class="pwm-row">
+            <label class="pwm-label">feet</label>
+            <input type="range" class="pwm-slider" id="pwm-feet" min="0" max="255" value="128">
+            <span class="pwm-val" id="pwm-feet-val">128</span>
+          </div>
+        </div>
+
+        <h2 class="section-header">chair position</h2>
+        <div class="chair-pos-row">
+          <span class="chair-pos-state" id="chair-pos-label">up</span>
+          <input type="range" class="chair-pos-slider" id="chair-pos-slider" min="0" max="100" value="0">
+        </div>
+
+        <h2 class="section-header">program</h2>
+        <div class="program-box">
+          <div class="prog-name" id="prog-name">—</div>
+          <div class="prog-desc" id="prog-desc"></div>
+          <div class="timing-sliders" id="timing-sliders">
+            <div class="timing-row">
+              <label class="timing-label">airbag inhale <span class="timing-default" id="t-airbag-on-default"></span></label>
+              <input type="range" class="timing-slider" id="t-airbag-on" min="0" max="15" step="0.5" value="0">
+              <span class="timing-val" id="t-airbag-on-val">—</span>
+            </div>
+            <div class="timing-row">
+              <label class="timing-label">airbag exhale <span class="timing-default" id="t-airbag-off-default"></span></label>
+              <input type="range" class="timing-slider" id="t-airbag-off" min="0" max="15" step="0.5" value="0">
+              <span class="timing-val" id="t-airbag-off-val">—</span>
+            </div>
+            <div class="timing-row">
+              <label class="timing-label">butt on <span class="timing-default" id="t-butt-on-default"></span></label>
+              <input type="range" class="timing-slider" id="t-butt-on" min="0" max="10" step="0.5" value="0">
+              <span class="timing-val" id="t-butt-on-val">—</span>
+            </div>
+            <div class="timing-row">
+              <label class="timing-label">butt off <span class="timing-default" id="t-butt-off-default"></span></label>
+              <input type="range" class="timing-slider" id="t-butt-off" min="0" max="10" step="0.5" value="0">
+              <span class="timing-val" id="t-butt-off-val">—</span>
+            </div>
+          </div>
         </div>
 
         <h2 class="patterns-header">demo patterns</h2>
@@ -151,21 +205,22 @@
           <span>model</span>
           <select id="s-model"></select>
         </label>
-        <div class="setting-row">
+        <div id="settings-error" class="settings-error hidden"></div>
+        <div class="setting-row" id="s-sent-row">
           <span>sentences <b id="s-sent-range">1 – 5</b></span>
           <div class="range-pair">
             <input type="range" id="s-sent-min" min="1" max="10" value="1" title="min sentences">
             <input type="range" id="s-sent-max" min="1" max="10" value="5" title="max sentences">
           </div>
         </div>
-        <div class="setting-row">
+        <div class="setting-row" id="s-words-row">
           <span>words <b id="s-words-range">15 – 100</b></span>
           <div class="range-pair">
             <input type="range" id="s-words-min" min="5" max="200" step="5" value="15" title="min words">
             <input type="range" id="s-words-max" min="5" max="200" step="5" value="100" title="max words">
           </div>
         </div>
-        <label class="setting-row">
+        <label class="setting-row" id="s-session-row">
           <span>session length <b id="s-session-val">10</b> min</span>
           <input type="range" id="s-session" min="2" max="20" step="1" value="10">
         </label>

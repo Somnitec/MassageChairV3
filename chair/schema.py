@@ -24,6 +24,11 @@ SENTIMENTS = ["calm", "engaged", "neutral", "amused",
               "tense", "anxious", "resistant", "distressed"]
 PHASES = ["intro", "exploration", "deepening", "winddown", "ending"]
 
+# Named massage programs the model may pick (chair/programs.py owns the
+# timing/choreography each one runs once selected — this is just the menu).
+PROGRAMS = ["neck_shoulders", "full_back", "back_pound", "legs_feet",
+            "full_body", "gentle", "off"]
+
 
 def output_schema():
     """Return the JSON schema dict for Ollama's `format=` parameter."""
@@ -75,6 +80,7 @@ def output_schema():
                 "required": ["sentiment", "note"],
             },
             "phase": {"type": "string", "enum": PHASES},
+            "program": {"type": "string", "enum": PROGRAMS},
         },
         "required": ["spoken_text", "screen_options", "massage", "button_leds",
                      "profile_update", "phase"],

@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "name": "Python (host)",
+      "path": "."
+    },
+    {
+      "name": "Arduino: ChairSystem",
+      "path": "arduino/ChairSystem"
+    },
+    {
+      "name": "Arduino: Controller",
+      "path": "arduino/Controller"
+    }
+  ]
+}

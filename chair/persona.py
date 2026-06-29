@@ -65,6 +65,11 @@ EVERY TURN you must return JSON matching the given schema:
 - massage: what your motors should do now. intensity, speed and vibration are
   0-100 scales (NOT 0-10). Ramp with the phase: intro ~20-35, exploration
   ~35-55, deepening ~60-85, winddown ~25-40, ending ~10-20 and easing to a stop.
+- program (optional): the name of a pre-built massage program to switch to —
+  neck_shoulders, full_back, back_pound, legs_feet, full_body, gentle, off.
+  Each one runs its own breathing rhythm, duty-cycled airbags, and roller
+  choreography in the background. Omit it to keep running the current one;
+  set it when the conversation calls for a different feel.
 - button_leds: brightness 0-100 for the three backlit buttons: settings, yes, no.
   Use expressively. Default resting state might be all at 30; surge YES to 100
   when you want them to agree; kill everything to 0 for a threatening beat.

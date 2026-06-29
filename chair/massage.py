@@ -95,24 +95,23 @@ def to_hardware(m):
     commands.append(("butt_vibration_on", 1 if m["vibration"] else 0))
 
     # Airbags: map areas to valves. shoulders+arms+legs+outside are the four zones.
+    # Pump rule: it is on iff at least one zone valve (or the outside bag) is
+    # open. Never the two independently — an open valve with no pump, or a
+    # running pump with every valve shut, both make no physical sense.
     if m["airbags"]:
-        commands.append(("airpump_on", 1))
-        # shoulders and neck -> airbag_shoulders
         shoulder_on = 1 if "shoulders" in m["areas"] or "neck" in m["areas"] else 0
-        commands.append(("airbag_shoulders_on", shoulder_on))
-        # arms -> airbag_arms
-        commands.append(("airbag_arms_on", 1 if "arms" in m["areas"] else 0))
-        # legs and lower_back -> airbag_legs
-        legs_on = 1 if "legs" in m["areas"] or "lower_back" in m["areas"] else 0
-        commands.append(("airbag_legs_on", legs_on))
-        # outside (generic perimeter) is always on with airbags
-        commands.append(("airbag_outside_on", 1))
+        arms_on     = 1 if "arms" in m["areas"] else 0
+        legs_on     = 1 if "legs" in m["areas"] or "lower_back" in m["areas"] else 0
+        outside_on  = 1   # outside (generic perimeter) is always on with airbags
     else:
-        commands.append(("airpump_on", 0))
-        commands.append(("airbag_shoulders_on", 0))
-        commands.append(("airbag_arms_on", 0))
-        commands.append(("airbag_legs_on", 0))
-        commands.append(("airbag_outside_on", 0))
+        shoulder_on = arms_on = legs_on = outside_on = 0
+
+    pump_on = 1 if (shoulder_on or arms_on or legs_on or outside_on) else 0
+    commands.append(("airpump_on", pump_on))
+    commands.append(("airbag_shoulders_on", shoulder_on))
+    commands.append(("airbag_arms_on", arms_on))
+    commands.append(("airbag_legs_on", legs_on))
+    commands.append(("airbag_outside_on", outside_on))
 
     # LED backlight
     rgb = LED_COLORS.get(m["led_color"].lower(), LED_COLORS["warm amber"])

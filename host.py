@@ -27,7 +27,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import config
 from chair import buttons, massage as massage_mod, panel
 from chair.hardware import ChairLink
+from chair.program_runner import ProgramRunner
+from chair.programs import PROGRAMS, DEFAULT_PROGRAM, program_params, public_programs
 from chair.session import Session
+from chair.script_session import ScriptSession
 from chair.states import (
     IDLE, HEADPHONES_ONLY, SITTING_ONLY, ACTIVE,
     IDLE_AMBIENT, IDLE_SCREEN_SETS,
@@ -38,9 +41,23 @@ from chair.tts import Speaker
 from simulate import resolve_model
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+CONTENT_DIR = os.path.join(ROOT, "content")
 
 # Set to False to silence Arduino send logs
 HARDWARE_DEBUG = True
+
+# -- script discovery --------------------------------------------------------
+def _get_available_scripts():
+    """Return list of available script names (chair_script_v2.json, chair_script_v3.json, etc.)."""
+    scripts = []
+    try:
+        for fname in os.listdir(CONTENT_DIR):
+            if fname.startswith("chair_script_") and fname.endswith(".json"):
+                name = fname.replace("chair_script_", "").replace(".json", "")
+                scripts.append(f"script:{name}")
+    except (OSError, FileNotFoundError):
+        pass
+    return sorted(scripts)
 
 # Human-readable labels for manual overlay log lines
 _OVERLAY_LOG = {
@@ -55,12 +72,14 @@ _OVERLAY_LOG = {
     "butt_vibration_on":   "vibration",
     "chair_down_on":       "recline",
 }
-_TECHNIQUE_OVERLAYS = {"roller_kneading_on", "roller_pounding_on"}
 _AREA_OVERLAYS = {
     "shoulders": "airbag_shoulders_on",
     "arms":      "airbag_arms_on",
     "legs":      "airbag_legs_on",
     "feet":      "feet_roller_on",
+}
+_AIRBAG_VALVE_OVERLAYS = {
+    "airbag_shoulders_on", "airbag_arms_on", "airbag_legs_on", "airbag_outside_on",
 }
 
 _STATIC_DIRS = {
@@ -138,8 +157,17 @@ def _ts():
 class ChairHost:
     """Owns the Session and the sensor state machine; fans out events to SSE subscribers."""
 
+    @staticmethod
+    def _make_session(model, session_s):
+        if model.startswith("script:"):
+            # Extract script name: script:v2 → chair_script_v2.json
+            script_name = model.replace("script:", "")
+            script_path = os.path.join(CONTENT_DIR, f"chair_script_{script_name}.json")
+            return ScriptSession(session_s=session_s, script_path=script_path)
+        return Session(model=model, session_s=session_s)
+
     def __init__(self, model, session_s, tts=True, hardware_port=None):
-        self.session    = Session(model=model, session_s=session_s)
+        self.session    = self._make_session(model, session_s)
         self.speaker    = Speaker(enabled=tts)
         self._model_arg    = model    # keep for session reset
         self._session_s    = session_s
@@ -182,6 +210,10 @@ class ChairHost:
         self._manual_roller_pos = 0.5   # 0 = bottom, 1 = top
         self._manual_status     = "green"
 
+        # background program runner (breathing, duty cycles, roller choreography)
+        self._runner = ProgramRunner(self._send_hardware_cmd, self.broadcast)
+        self._current_program = DEFAULT_PROGRAM
+
         self.state = {
             "spoken_text":   "",
             "screen_options": IDLE_SCREEN_SETS[0],
@@ -203,10 +235,18 @@ class ChairHost:
     def _build_manual_panel(self, layers):
         """Build a panel state dict directly from a set of overlay names."""
         layers = set(layers)
-        technique = ("knead" if "roller_kneading_on" in layers else
-                     "pound" if "roller_pounding_on" in layers else
-                     "roll"  if {"roller_up_on", "roller_down_on"} & layers else
-                     "none")
+        knead = "roller_kneading_on" in layers
+        pound = "roller_pounding_on" in layers
+        if knead and pound:
+            technique = "knead+pound"
+        elif knead:
+            technique = "knead"
+        elif pound:
+            technique = "pound"
+        elif {"roller_up_on", "roller_down_on"} & layers:
+            technique = "roll"
+        else:
+            technique = "none"
         areas = [a for a, ov in _AREA_OVERLAYS.items() if ov in layers]
         cur = self.state.get("panel") or {} if hasattr(self, "state") else {}
         return {
@@ -247,6 +287,19 @@ class ChairHost:
                 pass
             return
 
+        # PWM speed — send directly to hardware, no panel update needed
+        for pwm_key, hw_key in [("pwm_kneading", "roller_kneading_speed"),
+                                  ("pwm_pounding", "roller_pounding_speed"),
+                                  ("pwm_feet",     "feet_roller_speed")]:
+            if pwm_key in body:
+                try:
+                    val = max(0, min(255, int(body[pwm_key])))
+                    print(f"{pwm_key}: {val} (manual)")
+                    self._send_hardware_cmd(hw_key, val)
+                except (TypeError, ValueError):
+                    pass
+                return
+
         if "roller_dir" in body:
             d = body["roller_dir"]
             cur.discard("roller_up_on")
@@ -254,15 +307,53 @@ class ChairHost:
             if d == "up":
                 cur.add("roller_up_on")
                 print("rollers: up (manual)")
-                self._send_hardware_cmd("roller_position_motor_direction", 1)
+                # Use roller_position_target instead of motor_direction directly;
+                # rollerRoutine() continuously overrides motor_direction based on target,
+                # so setting target=10000 (top) is the only reliable way to drive upward.
+                self._send_hardware_cmd("roller_position_target_range", 10)
+                self._send_hardware_cmd("roller_position_target", 10000)
             elif d == "down":
                 cur.add("roller_down_on")
                 print("rollers: down (manual)")
-                self._send_hardware_cmd("roller_position_motor_direction", -1)
+                self._send_hardware_cmd("roller_position_target_range", 10)
+                self._send_hardware_cmd("roller_position_target", 0)
             else:  # "stop"
                 print(f"rollers: stopped (manual)  "
                       f"estimated position: {self._manual_roller_pos:.2f}  (0=bottom, 1=top)")
-                self._send_hardware_cmd("roller_position_motor_direction", 0)
+                # Setting range=10000 makes the firmware always consider itself "in position",
+                # which stops the motor without needing to know the exact estimated position.
+                self._send_hardware_cmd("roller_position_target_range", 10000)
+
+        elif "chair_dir" in body:
+            d = body["chair_dir"]
+            cur.discard("chair_up_on")
+            cur.discard("chair_down_on")
+            cur.discard("chair_status_up")
+            cur.discard("chair_status_down")
+            if d == "up":
+                cur.add("chair_up_on")
+                cur.add("chair_status_down")  # still reclined until we reach the top
+                print("chair: moving up (manual)")
+                # chair_position_target triggers chairNewInput in firmware, which drives
+                # the motor direction. Direct motor_direction gets overridden by the routine.
+                self._send_hardware_cmd("chair_position_target", 10000)
+            elif d == "down":
+                cur.add("chair_down_on")
+                cur.add("chair_status_down")
+                print("chair: moving down (manual)")
+                self._send_hardware_cmd("chair_position_target", 0)
+            else:  # "stop"
+                try:
+                    chair_pos = float(body.get("chair_pos", 1.0))
+                except (TypeError, ValueError):
+                    chair_pos = 1.0
+                if chair_pos <= 0.01:
+                    cur.add("chair_status_up")
+                else:
+                    cur.add("chair_down_on")
+                    cur.add("chair_status_down")
+                print(f"chair: stopped, estimated pos {chair_pos:.2f}  (0=up, 1=down)")
+                self._send_hardware_cmd("chair_position_motor_direction", 0)
 
         elif "status" in body:
             self._manual_status = body["status"]
@@ -273,14 +364,6 @@ class ChairHost:
         elif "name" in body:
             name   = body["name"]
             active = bool(body.get("active", True))
-
-            # mutual exclusion: only one technique at a time
-            if active and name in _TECHNIQUE_OVERLAYS:
-                cur -= _TECHNIQUE_OVERLAYS
-                # turn off the other technique on hardware too
-                for other in _TECHNIQUE_OVERLAYS - {name}:
-                    if other in self._HW_DIRECT:
-                        self._send_hardware_cmd(other, 0)
 
             # compound: recline drives two layers + removes chair_status_up
             if name == "chair_down_on":
@@ -303,6 +386,12 @@ class ChairHost:
                 if name in self._HW_DIRECT:
                     self._send_hardware_cmd(name, 1 if active else 0)
 
+                # Pump rule: pump is on iff any zone valve (or the outside
+                # bag) is open. Recompute whenever a valve overlay changes.
+                if name in _AIRBAG_VALVE_OVERLAYS:
+                    pump_on = 1 if (cur & _AIRBAG_VALVE_OVERLAYS) else 0
+                    self._send_hardware_cmd("airpump_on", pump_on)
+
         pstate = self._build_manual_panel(cur)
         self.state["panel"] = pstate
         self.broadcast("panel_update", panel=pstate)
@@ -311,6 +400,9 @@ class ChairHost:
     def start(self):
         threading.Thread(target=self._worker,    daemon=True).start()
         threading.Thread(target=self._idle_loop, daemon=True).start()
+        self._send_hardware_cmd("chair_position_target", 10000)  # fully up at boot
+        self._send_hardware_cmd("redgreen_statuslight", 0)        # off until experience starts
+        self._runner.start("_idle_breathing", phase="idle")
 
     # -- sensor input -----------------------------------------------------
     def update_sensors(self, headphones: bool, sitting: bool):
@@ -335,6 +427,25 @@ class ChairHost:
                        headphones=headphones, sitting=sitting)
         self.broadcast("log",
                        line=f"state: {prev_state} → {new_state}")
+
+        # --- physical rules: chair position, status light, breathing rhythm ---
+        if new_state == IDLE:
+            self._send_hardware_cmd("chair_position_target", 10000)  # fully up
+            self._send_hardware_cmd("redgreen_statuslight", 0)
+            self._runner.start("_idle_breathing", phase="idle")
+        elif new_state == ACTIVE:
+            self._send_hardware_cmd("redgreen_statuslight", 1)
+            if prev_state != ACTIVE:
+                prog = PROGRAMS.get(self._current_program, PROGRAMS[DEFAULT_PROGRAM])
+                # initial_recline: 0=up .. 100=fully down; hardware target is inverted (10000=up, 0=down)
+                recline_target = int(10000 * (1 - prog.get("initial_recline", 0) / 100))
+                self._send_hardware_cmd("chair_position_target", recline_target)
+                self._runner.start(self._current_program, phase=self.session.phase,
+                                   sentiment="neutral")
+        else:
+            # HEADPHONES_ONLY or SITTING_ONLY — partial presence, breathing
+            # speeds up in excitement but stays on the idle program.
+            self._runner.update_phase("excitement")
 
         # --- ACTIVE → something: handle the loss of a sensor mid-session ---
         if prev_state == ACTIVE:
@@ -665,6 +776,16 @@ class ChairHost:
         })
         self.generating = False
 
+        # Drive the background program runner from this turn's phase/sentiment
+        sentiment = resp["profile_update"]["sentiment"]
+        self._runner.update_phase(resp["phase"])
+        self._runner.update_sentiment(sentiment)
+        new_program = resp.get("program")
+        if new_program and new_program in PROGRAMS and new_program != self._current_program:
+            self._current_program = new_program
+            self._runner.start(new_program, phase=resp["phase"], sentiment=sentiment)
+            self.broadcast("program", name=new_program, description=PROGRAMS[new_program].get("description",""), **program_params(PROGRAMS[new_program]))
+
         # Send massage commands to hardware MCU (if connected)
         self._send_hardware_massage(resp["massage"])
 
@@ -691,7 +812,7 @@ class ChairHost:
             self.chair_state = IDLE
             self.state["chair_state"] = IDLE
             # Reset for next person
-            self.session = Session(model=self._model_arg, session_s=self._session_s)
+            self.session = self._make_session(self._model_arg, self._session_s)
             self._session_ever_active = False
             self._nudge_count = 0
             self.broadcast("log", line="— session time is up —", level="warn")
@@ -702,6 +823,12 @@ class ChairHost:
     def warmup_model(self):
         """Unload the previous model, then load the current one into Ollama GPU memory."""
         model = self.session.model
+
+        # Script mode needs no Ollama — signal ready immediately.
+        if model.startswith("script:"):
+            self.broadcast("log", line=f"{model} — no model load needed")
+            self.broadcast("model_ready", model=model)
+            return
 
         # Unload the previously loaded model so it frees GPU memory immediately.
         if self._loaded_model and self._loaded_model != model:
@@ -817,7 +944,11 @@ class Handler(BaseHTTPRequestHandler):
                                     "headphones":  h, "sitting": s})
 
         if path == "/settings":
-            self._apply_settings(body)
+            try:
+                self._apply_settings(body)
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
             return self._send_json(self._get_settings())
 
         if path == "/massage":
@@ -836,9 +967,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- settings ---------------------------------------------------------
     def _get_settings(self):
+        model = self.host.session.model
+        is_script = model.startswith("script:")
+        cur_prog = PROGRAMS.get(self.host._current_program, PROGRAMS[DEFAULT_PROGRAM])
         return {
-            "model":         self.host.session.model,
+            "model":         model,
             "models":        config.MODELS,
+            "scripts":       _get_available_scripts(),
+            "is_script":     is_script,
             "sentences_min": config.SENTENCES_MIN,
             "sentences_max": config.SENTENCES_MAX,
             "words_min":     config.WORDS_MIN,
@@ -846,12 +982,27 @@ class Handler(BaseHTTPRequestHandler):
             "tts_enabled":   config.TTS_ENABLED,
             "session_s":     self.host.session.session_s,
             "patterns":      list(DEMO_PATTERNS.keys()),
+            "programs":      list(public_programs().keys()),
+            "program":       self.host._current_program,
+            "program_description": cur_prog.get("description", ""),
+            "program_params": program_params(cur_prog),
+            "program_overrides": dict(self.host._runner.overrides),
         }
 
     def _apply_settings(self, body):
         if "model" in body:
-            self.host.session.model = resolve_model(str(body["model"]))
-            self.host._model_arg    = self.host.session.model
+            new_model = resolve_model(str(body["model"]))
+            self.host._model_arg = new_model
+            # Swap session class if crossing the script/LLM boundary
+            old_is_script = isinstance(self.host.session, ScriptSession)
+            new_is_script = new_model.startswith("script:")
+            if old_is_script != new_is_script:
+                try:
+                    self.host.session = self.host._make_session(new_model, self.host._session_s)
+                except ValueError as e:
+                    raise ValueError(f"Script validation error: {e}") from e
+            else:
+                self.host.session.model = new_model
         if "sentences_min" in body:
             try:
                 config.SENTENCES_MIN = max(1, min(10, int(body["sentences_min"])))
@@ -886,6 +1037,25 @@ class Handler(BaseHTTPRequestHandler):
             name = body["pattern"]
             if name in DEMO_PATTERNS:
                 self.host.set_manual_massage(DEMO_PATTERNS[name])
+            if name in PROGRAMS and not name.startswith("_"):
+                self.host._current_program = name
+                self.host._runner.start(name, phase=self.host.session.phase,
+                                        sentiment=self.host.state.get("profile", {}).get(
+                                            "sentiment", "neutral"))
+                self.host.broadcast("program", name=name, description=PROGRAMS[name].get("description",""), **program_params(PROGRAMS[name]))
+        if "program" in body:
+            name = body["program"]
+            if name in PROGRAMS and not name.startswith("_"):
+                self.host._current_program = name
+                self.host._runner.start(name, phase=self.host.session.phase,
+                                        sentiment=self.host.state.get("profile", {}).get(
+                                            "sentiment", "neutral"))
+                self.host.broadcast("program", name=name, description=PROGRAMS[name].get("description",""), **program_params(PROGRAMS[name]))
+        if "program_overrides" in body:
+            overrides = body["program_overrides"]
+            if isinstance(overrides, dict):
+                self.host._runner.set_overrides(overrides)
+                self.host.broadcast("program_overrides", overrides=dict(self.host._runner.overrides))
         self.host.broadcast("log",
                             line=f"settings: model={self.host.session.model} "
                                  f"sent={config.SENTENCES_MIN}-{config.SENTENCES_MAX} "
