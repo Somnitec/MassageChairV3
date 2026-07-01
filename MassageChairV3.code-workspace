@@ -12,5 +12,8 @@
       "name": "Arduino: Controller",
       "path": "arduino/Controller"
     }
-  ]
+  ],
+  "settings": {
+    "platformio-ide.autoPreloadEnvTasks": true
+  }
 }

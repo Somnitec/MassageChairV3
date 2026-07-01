@@ -13,6 +13,18 @@ ChairSystem MCU (the one that drives all the motors/airbags/LEDs):
 Controller MCU (buttons + 3 OLEDs, NOT motors):
   - 115200 baud. MCU -> host: {"controllerCommand":"buttonYes","controllerValue":"1"}
   - Host -> MCU: {"<infoKey>":[...]} e.g. {"customScreenA":["hello"]}
+    Screen text takes an optional second array element choosing the
+    transition effect: instant|wipe|flash|typewriter|marquee, e.g.
+    {"customScreenA":["hello","typewriter"]}. Default is "wipe". Text too
+    long to fit even the smallest font gets truncated with a trailing "..."
+    rather than clipped mid-glyph, so length is never a caller concern;
+    effect "marquee" scrolls instead of truncating, if ever wanted.
+    {"screenPulseA":[true]} (also B/C) starts a continuous
+    "breathing" brightness pulse (e.g. a "thinking" indicator) on that
+    screen; false stops it.
+  - The controller also prints human-only debug lines starting with "# ",
+    never containing '{' or '}' -- ChairLink.drain() surfaces each as
+    {"_log": "..."} rather than trying (and failing) to JSON-parse it.
 
 This module talks to either, but the motor smoke test only needs the ChairSystem
 MCU. A `port` may be a local device path ("/dev/ttyACM0") or a network bridge
@@ -25,6 +37,7 @@ import os
 import select
 import socket
 import subprocess
+import sys
 import time
 
 
@@ -45,8 +58,11 @@ class ChairLink:
             self._sock.setblocking(False)
         else:
             # configure line discipline first; raw = 8N1, no echo, no canon
+            # GNU stty (Linux) takes the device via -F; BSD stty (macOS) via
+            # lowercase -f. Every other flag here is spelled the same on both.
+            device_flag = "-f" if sys.platform == "darwin" else "-F"
             subprocess.run(
-                ["stty", "-F", self.port, str(self.baud), "raw", "-echo", "-echoe",
+                ["stty", device_flag, self.port, str(self.baud), "raw", "-echo", "-echoe",
                  "-echok", "-echoctl", "-echoke", "-ixon", "-crtscts"],
                 check=True,
             )
@@ -127,15 +143,32 @@ class ChairLink:
         return blobs
 
     def _extract_objects(self):
-        """Pull balanced {...} objects out of the rx buffer."""
+        """Pull balanced {...} objects out of the rx buffer.
+
+        Also surfaces any plain-text lines found between/before objects
+        (e.g. the Controller MCU's "# ..." human debug log) as
+        {"_log": line} entries, so callers see them without needing a raw
+        serial monitor. Bytes are never dropped mid-line: an unterminated
+        trailing fragment is left in the buffer for the next read."""
         objs, depth, start = [], 0, None
         i = 0
         consumed = 0
+        plain_start = 0
         buf = self._rxbuf
+
+        def flush_plain(end):
+            nonlocal plain_start
+            for line in buf[plain_start:end].splitlines():
+                line = line.strip()
+                if line:
+                    objs.append({"_log": line})
+            plain_start = end
+
         while i < len(buf):
             c = buf[i]
             if c == "{":
                 if depth == 0:
+                    flush_plain(i)
                     start = i
                 depth += 1
             elif c == "}":
@@ -148,8 +181,17 @@ class ChairLink:
                         except json.JSONDecodeError:
                             objs.append({"_raw": chunk})
                         consumed = i + 1
+                        plain_start = consumed
             i += 1
-        self._rxbuf = buf[consumed:]
+
+        if depth == 0:
+            # only flush complete lines; keep any unterminated tail buffered
+            tail = buf[plain_start:]
+            last_nl = tail.rfind("\n")
+            if last_nl != -1:
+                flush_plain(plain_start + last_nl + 1)
+
+        self._rxbuf = buf[plain_start:]
         return objs
 
 
